@@ -25,7 +25,9 @@ def begin(s,data,u):
     if s.scalar(select(TrialExecution.id).where(TrialExecution.estimate_id==e.id)):raise HTTPException(409,'该估单已经开工，不可重复建立实绩')
     trial_ready(s,e,stamp(data.started_at))
     m=item(s,Mould,e.mould_id)
-    x=TrialExecution(estimate_id=e.id,started_at=stamp(data.started_at).isoformat(),snapshot={'estimate_code':e.code,'predicted_hours':e.predicted_hours,'quoted_amount':e.quote_amount,'rate':e.rate,'mould_code':m.code,'slot_id':e.slot_id},status='running')
+    # 开工即冻结工艺规格与准备工时，作为后续实绩回灌训练样本的固定依据
+    frozen_spec={'mould_id':m.id,'mould_code':m.code,'cavities':m.cavities,'slides':m.slides,'steel':m.steel,'weight_kg':m.weight_kg,'setup_hours':e.setup_hours,'frozen_at':stamp(data.started_at).isoformat()}
+    x=TrialExecution(estimate_id=e.id,started_at=stamp(data.started_at).isoformat(),snapshot={'estimate_code':e.code,'predicted_hours':e.predicted_hours,'quoted_amount':e.quote_amount,'rate':e.rate,'mould_code':m.code,'slot_id':e.slot_id,'frozen_spec':frozen_spec},status='running')
     s.add(x);record(s,u,'试模开工 '+e.code);s.flush();return x
 def finish(s,eid,data,u):
     x=s.query(TrialExecution).filter_by(id=eid).with_for_update().one_or_none()
@@ -69,4 +71,9 @@ def sign(s,rid,u):
     for key,value in amounts(x,derived).items():setattr(r,key,value)
     freeze_material_cost(s,r)
     if (abs(r.variance_pct)>20 or r.margin<0)and len(r.reason.strip())<8:raise HTTPException(409,'工时偏差超过20%或负毛利，须填写至少8字的复核说明')
-    r.status='signed';r.signed_by=u.email;x.status='settled';record(s,u,'主管签结 '+x.snapshot['estimate_code']);return r
+    r.status='signed';r.signed_by=u.email;x.status='settled';record(s,u,'主管签结 '+x.snapshot['estimate_code'])
+    # 签结即把实绩纳入回灌通道：冻结依据齐全直接待回灌，旧实绩缺依据进待补证
+    from . import feedback_service as fb
+    e=item(s,Estimate,x.estimate_id);m=item(s,Mould,e.mould_id)
+    fb.create_from_review(s,r,x,e,m,u,missing_evidence=not x.snapshot.get('frozen_spec'))
+    return r

@@ -4,6 +4,7 @@ from src.db import Base,engine,Session
 from src.models import User,Mould,MachineSlot,Estimate,TrialHistory
 from src.execution_models import TrialExecution,CostReview
 from src.workshop_models import MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery
+from src.feedback_models import TrainingSample,TrainingSampleVersion
 from src.auth import hash_password
 
 def seed():
@@ -35,5 +36,5 @@ def seed():
             if not s.scalar(select(ResinLot).where(ResinLot.code==code)):
                 s.add(ResinLot(code=code,grade=grade,received_kg=qty,available_kg=qty,unit_price=price,state=state))
         s.commit()
-        print({t.__tablename__:s.scalar(select(func.count()).select_from(t)) for t in (User,Mould,MachineSlot,Estimate,TrialHistory,TrialExecution,CostReview,MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery)})
+        print({t.__tablename__:s.scalar(select(func.count()).select_from(t)) for t in (User,Mould,MachineSlot,Estimate,TrialHistory,TrialExecution,CostReview,MaintenanceWindow,ResinLot,TrialMaterial,ReviewMaterialLedger,TrialDelivery,TrainingSample,TrainingSampleVersion)})
 if __name__=='__main__':seed()

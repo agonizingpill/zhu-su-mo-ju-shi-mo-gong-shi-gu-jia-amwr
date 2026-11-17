@@ -11,12 +11,14 @@
 - 误差与工时解释：交叉特征、Ridge 标准化系数，128 条训练与 32 条留出验证，固定 seed 42；展示留出 MAE 和实际/预测散点。
 - 机时排程：估价员申请，负责人承诺。底价为预测总工时 × 费率 × 1.15。申请不预占；承诺时行锁核对容量、累加预留并锁单，防止重复承诺或超售。低价或余量不足均不改变已有预留。
 
-- 试模实绩采集：仅已承诺估单开工，一单一份；开工保存预测机时、报价、费率和模具快照。完工时间推导实际机时，良品不得超过总射次；超时完工由负责人填写原因确认。
+- 试模实绩采集：仅已承诺估单开工，一单一份；开工保存预测机时、报价、费率、模具快照，并冻结当时工艺规格（腔/滑块/钢/重量）与准备工时作为回灌依据。完工时间推导实际机时，良品不得超过总射次；超时完工由负责人填写原因确认。
 - 工时偏差结算：已完工实绩计算实际成本、工时偏差与毛利；偏差绝对值超过20%或毛利为负时，签结前必须补足说明。负责人签结同步冻结实绩及结算草稿，拒绝重复签结。
 
 - 模具保养停机：计划→主管批准→保养完检；批准窗口同模具不得重叠。新开工核对停机时间、同模已有running实绩，批准停机也检查未完工试模，避免冲突。已完检保留停机历史，过去已签结数据不改。
 - 试模材料领耗：主管树脂批次入库，树脂状态available/quarantine；运行实绩按批次一次领料，锁库存，冻结单价；完工且未建结算可一次退余料，最多退领量。净耗成本=Σ((领kg−退kg)×单价快照)。所有新结算按台账取成本，拒绝任意覆盖；结算建立后领退料冻结。已signed历史数值保持，不补写旧凭据。
 - 客户交付验收：只从signed结算交样，样件数≤实绩good_shots；发样→客户签收→接受或整改→主管关闭。整改必须绑定原完工之后新一次同模具signed实绩，旧实绩或其他模具不能替代；重复签收/关闭拒绝。这里只留本地交接和客户意见，不发送外部消息。
+
+- 实绩回灌训练：开工即冻结工艺规格与准备工时快照；结算签结后自动建训练样本，训练目标=实际工时−准备工时，非正值隔离不入库。旧实绩缺开工冻结依据时进「待补证」，补证经负责人确认且不改结算后才回灌。回灌走 Redis 队列由 worker 幂等消费，扫描端点可中断续跑、重试不重复入库；负责人可撤回或更正样本，更正生成新版本并保留旧版。撤回与回灌并发时，在途旧任务受终态守卫约束不会复活样本。每次训练固定当时 active 的样本版本，后续更正/撤回不混入已完成估价，历史估价可回查原样本依据。
 
 ## 快速启动
 
@@ -53,13 +55,17 @@ JWT 8 小时过期，密码 PBKDF2-SHA256 盐化存储。演示账号只用于�
 
 V3：09:00 MD-115计划11月25日08:00—12:00顶针润滑与滑块检查，主管批准，完检记回位/模面结果；任何新开工不能回填到该窗口。10:00 RS-P20-DEMO树脂单价20元/kg，为运行试模领30kg；完工退5kg，库存净减25kg、净耗500元，结算材料成本只读500元。11:00签结后交10件样件给华远质量部，记录签收与验收；若卡扣装配需整改，必须再建同模新估单、承诺、开工完工、净耗结算signed后才能绑定关闭。
 
+V4 实绩回灌：结算签结后在「10 实绩回灌训练」看到样本自动进入待回灌，worker 入库后训练目标=实际工时−开工冻结的准备工时；准备工时≥实际工时的样本进非正隔离并写明原因。历史已签结但缺开工冻结依据的样本停在待补证，估价员登记凭据、负责人确认后才回灌，已签结算数值不变。负责人可撤回异常样本（在途队列任务不会使其复活），或更正冻结依据生成新版本，旧版本在版本链可查；每次估算的模型证据固定取数当时的 active 版本与基线160条，之后更正不影响历史估价。
+
 ## 算法口径与限制
 
-输入模腔数、滑块数、重量、钢材编码（P20=0、H13=1、S136=2）。PolynomialFeatures(degree=2, interaction_only=True) 生成原始项和交叉项，StandardScaler 按训练集拟合，Ridge(alpha=3) 回归实际试模工时，本单总预测工时另加准备工时。训练/验证分割固定 42，仅在训练集拟合模型和标准化器；MAE 是留出样本 mean(abs(actual-predicted))。样本少于30失败，预测基础工时下限0.5h。钢材是演示工艺序列编码，扩展无序材料时应改one-hot并重训。
+输入模腔数、滑块数、重量、钢材编码（P20=0、H13=1、S136=2）。PolynomialFeatures(degree=2, interaction_only=True) 生成原始项和交叉项，StandardScaler 按训练集拟合，Ridge(alpha=3) 回归实际试模工时，本单总预测工时另加准备工时。训练/验证分割固定 42，仅在训练集拟合模型和标准化器；MAE 是留出样本 mean(abs(actual-predicted))。样本少于30失败，预测基础工时下限0.5h。钢材是演示工艺序列编码，扩展无序材料时应改one-hot并重训。训练集=160条基线试模 + 当时 active 的回灌样本版本（训练目标已扣除开工冻结的准备工时）；模型结果固化本次取数的样本清单与版本号，撤回/更正只影响之后的估算，历史估价依据可在证据页回查。
 
-Redis worker结果持久化 Estimate.model_result，同时写 backend/worker 共享命名卷 `/artifacts/estimate-<id>.json`。worker 在取走作业后故障中断的自动重投尚未实现；生产化需可靠队列和恢复机制。时段是人工预算，未实现跨日物理日历或设备停机联动。小型项目没有删除、承诺撤销或财务对接。实际工时按开工/完工时间差计算，未填时区按上海解释，保存UTC。单次最长168h，材料成本由领退料台账计算，单价在领料时冻结；没有停机扣时、工资分摊和多次试模合并。完工实绩没有自动写入训练参考表，基准160条不被暗改。
+Redis worker结果持久化 Estimate.model_result，同时写 backend/worker 共享命名卷 `/artifacts/estimate-<id>.json`。worker 在取走作业后故障中断的自动重投尚未实现；生产化需可靠队列和恢复机制。时段是人工预算，未实现跨日物理日历或设备停机联动。小型项目没有删除、承诺撤销或财务对接。实际工时按开工/完工时间差计算，未填时区按上海解释，保存UTC。单次最长168h，材料成本由领退料台账计算，单价在领料时冻结；没有停机扣时、工资分摊和多次试模合并。签结后实绩经回灌通道写入独立的版本化训练样本表（非正隔离、可撤回/更正），基线160条 TrialHistory 保持不被暗改。
 
 V3范围：保养时间和客户签收可按演示日期录入，无设备时钟联锁；同模具仅允许一份running实绩。每次试模对同树脂批次只领一次，不提供追加领料或多次退料；批次隔离后的退回库存仍保持隔离。客户样件数按good_shots上界，不另展开一射多腔件数。没有仓库外接、实际物流发送、客户门户或电子签章。
+
+V4范围：回灌样本与签结实绩一一对应，撤回是终态（样本不再参与训练，版本链仍保留可回查；如需重新纳入须先更正修正问题数据后再由新流程产生样本）；补证只登记文本凭据，不挂载外部附件。回灌队列与估算队列共用同一 worker，Redis 不可用时退化为进程内队列并保留同步入库兜底端点；生产化仍建议引入可靠队列与死信机制。回灌不改变已签结算与基线160条，基线数据仍只由 seed 维护。
 
 ## 本地开发与结构
 
@@ -76,11 +82,15 @@ V3 `backend/src/workshop_models.py`定义MaintenanceWindow、ResinLot、TrialMat
 
 `backend/src/execution_models.py` 定义实绩/结算外键与唯一约束，`execution_schemas.py` 校验输入，`execution_service.py` 管理快照、工时与成本事务，`execution_routes.py` 暴露 `/executions`、`/cost-reviews` 及 finish/sign 操作。
 
-`frontend/src/pages/` 的 moulds/estimates/evidence/schedule/executions/reviews 及 maintenance/materials/deliveries 是九页；`api.js` HTTP；`store.js` 业务状态；`components/common.js` 状态标签/证据条/选择器跨页复用；`utils/format.js` 转义、金额/数字和表单工具。
+V4 `backend/src/feedback_models.py` 定义 TrainingSample（签结实绩一对一，含开工冻结规格/准备工时与训练目标）和 TrainingSampleVersion（active/superseded 版本链）；`feedback_schemas.py` 校验补证、撤回与更正，`feedback_service.py` 负责建档、幂等入库、非正隔离、补证确认、撤回与版本留痕，`feedback_routes.py` 暴露 `/training-samples`、`/training-samples/{id}/versions` 及 backfill/ingest/evidence/withdraw/correct 操作。worker 同时消费 `mould-estimates` 与 `training-feedback` 两个队列，无 Redis 时退化进程内队列。
+
+`frontend/src/pages/` 的 moulds/estimates/evidence/schedule/executions/reviews 及 maintenance/materials/deliveries/feedback 是十页；`api.js` HTTP；`store.js` 业务状态；`components/common.js` 状态标签/证据条/选择器跨页复用；`utils/format.js` 转义、金额/数字和表单工具。
 
 本地 `pip install -r backend/requirements.txt`，设置 DATABASE_URL/REDIS_URL，在backend目录 `uvicorn src.main:app --reload`，另一终端 `python -m src.worker`。前端建议使用Compose Nginx代理。
 
-枚举位置：角色、估价状态、实绩状态、结算、保养、树脂、领料、交付状态与钢材定义在 `backend/src/constants.py` 和 `frontend/src/constants.js`；`GET /enums` 返回上述九组。钢材输入Literal在schemas.py、模型编码在ml.py。后端权限为真实约束，前端禁用按钮作提示。IntegrityError转成可恢复409。
+回灌回归测试覆盖开工冻结、签结建档、幂等入库、非正隔离、补证确认、撤回/更正版本、并发旧任务守卫与训练依据固定：`pip install -r backend/requirements-dev.txt` 后在 backend 目录运行 `python tests/test_feedback.py`（SQLite 内存库 + 无 Redis 退化队列，无需外部服务）。
+
+枚举位置：角色、估价状态、实绩状态、结算、保养、树脂、领料、交付、训练样本与样本版本状态、钢材定义在 `backend/src/constants.py` 和 `frontend/src/constants.js`；`GET /enums` 返回上述各组。钢材输入Literal在schemas.py、模型编码在ml.py。后端权限为真实约束，前端禁用按钮作提示。IntegrityError转成可恢复409。
 
 环境变量见 `.env.example`：COMPOSE_PROJECT_NAME、FRONTEND_PORT、BACKEND_PORT、DB_PORT、JWT_SECRET、SEED_DEMO。`COMPOSE_SUBNET=10.221.23.0/24` 是本机默认地址池已满后的专用网段；冲突时改空闲网段。数据库、Redis、计算产物为命名卷。
 
